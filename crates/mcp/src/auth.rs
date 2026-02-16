@@ -280,29 +280,45 @@ impl McpOAuthProvider {
         let server_url = Url::parse(&self.server_url)
             .with_context(|| format!("invalid MCP server URL: {}", self.server_url))?;
 
-        // Step 1: Try to get resource metadata URL from WWW-Authenticate header,
-        // or fall back to well-known endpoint.
-        let resource_meta =
+        // Step 1: Try to get resource metadata (RFC 9728) from WWW-Authenticate
+        // header or well-known endpoint. If that fails, fall back to fetching
+        // AS metadata (RFC 8414) directly from the server's origin.
+        let resource_meta_result =
             if let Some(meta_url) = www_authenticate.and_then(parse_www_authenticate) {
                 debug!(url = %meta_url, "using resource_metadata URL from WWW-Authenticate");
                 let meta_url = Url::parse(&meta_url)
                     .context("invalid resource_metadata URL in WWW-Authenticate header")?;
-                fetch_resource_metadata(&self.http_client, &meta_url).await?
+                fetch_resource_metadata(&self.http_client, &meta_url).await
             } else {
-                fetch_resource_metadata(&self.http_client, &server_url).await?
+                fetch_resource_metadata(&self.http_client, &server_url).await
             };
 
-        let resource = resource_meta.resource.clone();
-
-        // Step 2: Get AS metadata
-        let as_url_str = resource_meta
-            .authorization_servers
-            .first()
-            .context("no authorization_servers in protected resource metadata")?;
-        let as_url = Url::parse(as_url_str)
-            .with_context(|| format!("invalid authorization server URL: {as_url_str}"))?;
-
-        let as_meta = fetch_as_metadata(&self.http_client, &as_url).await?;
+        // Step 2: Get AS metadata — either from resource metadata's
+        // authorization_servers list, or directly from the server's origin.
+        let (as_meta, resource) = match resource_meta_result {
+            Ok(resource_meta) => {
+                let resource = resource_meta.resource.clone();
+                let as_url_str = resource_meta
+                    .authorization_servers
+                    .first()
+                    .context("no authorization_servers in protected resource metadata")?;
+                let as_url = Url::parse(as_url_str)
+                    .with_context(|| format!("invalid authorization server URL: {as_url_str}"))?;
+                let as_meta = fetch_as_metadata(&self.http_client, &as_url).await?;
+                (as_meta, resource)
+            },
+            Err(e) => {
+                debug!(
+                    server = %self.server_name,
+                    error = %e,
+                    "RFC 9728 resource metadata unavailable, trying RFC 8414 on server origin"
+                );
+                // Fall back: fetch AS metadata directly from the server URL.
+                let as_meta = fetch_as_metadata(&self.http_client, &server_url).await?;
+                let resource = self.server_url.clone();
+                (as_meta, resource)
+            },
+        };
 
         // Step 3: Dynamic client registration (or use cached)
         let client_id = if let Some(cached) = self.registration_store.load(&self.server_url) {
