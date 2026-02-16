@@ -2613,12 +2613,13 @@ impl ChatService for LiveChatService {
                             timeout_secs = agent_timeout_secs,
                             "agent run timed out"
                         );
+                        let detail = format!("Agent run timed out after {agent_timeout_secs}s");
                         let error_obj = serde_json::json!({
                             "type": "timeout",
-                            "message": format!(
-                                "Agent run timed out after {agent_timeout_secs}s"
-                            ),
+                            "title": "Timed out",
+                            "detail": detail,
                         });
+                        deliver_channel_error(&state, &session_key_clone, &error_obj).await;
                         broadcast(
                             &state,
                             "chat",
@@ -2676,10 +2677,7 @@ impl ChatService for LiveChatService {
                 .write()
                 .await
                 .remove(&session_key_clone);
-            active_reply_medium
-                .write()
-                .await
-                .remove(&session_key_clone);
+            active_reply_medium.write().await.remove(&session_key_clone);
 
             // Release the semaphore *before* draining so replayed sends can
             // acquire it. Without this, every replayed `chat.send()` would
@@ -4021,6 +4019,7 @@ async fn run_with_tools(
     let run_id_for_events = run_id.to_string();
     let session_key_for_events = session_key.to_string();
     let session_store_for_events = session_store.map(Arc::clone);
+    let provider_name_for_events = provider_name.to_string();
     let (on_event, mut event_rx) = ordered_runner_event_callback();
     let event_forwarder = tokio::spawn(async move {
         // Track tool call arguments from ToolCallStart so they can be persisted in ToolCallEnd.
@@ -4318,12 +4317,33 @@ async fn run_with_tools(
                     "toolCallsMade": tool_calls_made,
                     "seq": seq,
                 }),
-                RunnerEvent::RetryingAfterError(_) => serde_json::json!({
-                    "runId": run_id,
-                    "sessionKey": sk,
-                    "state": "retrying",
-                    "seq": seq,
-                }),
+                RunnerEvent::RetryingAfterError { error, delay_ms } => {
+                    let error_obj =
+                        parse_chat_error(&error, Some(provider_name_for_events.as_str()));
+                    if error_obj.get("type").and_then(|v| v.as_str()) == Some("rate_limit_exceeded")
+                    {
+                        let state_clone = Arc::clone(&state);
+                        let sk_clone = sk.clone();
+                        let error_clone = error_obj.clone();
+                        tokio::spawn(async move {
+                            send_retry_status_to_channels(
+                                &state_clone,
+                                &sk_clone,
+                                &error_clone,
+                                Duration::from_millis(delay_ms),
+                            )
+                            .await;
+                        });
+                    }
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "retrying",
+                        "error": error_obj,
+                        "retryAfterMs": delay_ms,
+                        "seq": seq,
+                    })
+                },
             };
             broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
         }
@@ -4568,6 +4588,7 @@ async fn run_with_tools(
             state.set_run_error(run_id, error_str.clone()).await;
             let error_obj = parse_chat_error(&error_str, Some(provider_name));
             mark_unsupported_model(state, model_store, model_id, provider_name, &error_obj).await;
+            deliver_channel_error(state, session_key, &error_obj).await;
             let error_payload = ChatErrorBroadcast {
                 run_id: run_id.to_string(),
                 session_key: session_key.to_string(),
@@ -4893,6 +4914,7 @@ async fn run_streaming(
                 let error_obj = parse_chat_error(&msg, Some(provider_name));
                 mark_unsupported_model(state, model_store, model_id, provider_name, &error_obj)
                     .await;
+                deliver_channel_error(state, session_key, &error_obj).await;
                 let error_payload = ChatErrorBroadcast {
                     run_id: run_id.to_string(),
                     session_key: session_key.to_string(),
@@ -5052,6 +5074,126 @@ fn format_logbook_html(entries: &[String]) -> String {
     }
     html.push_str("</blockquote>");
     html
+}
+
+fn format_channel_retry_message(error_obj: &Value, retry_after: Duration) -> String {
+    let retry_secs = ((retry_after.as_millis() as u64).saturating_add(999) / 1_000).max(1);
+    if error_obj.get("type").and_then(|v| v.as_str()) == Some("rate_limit_exceeded") {
+        format!("⏳ Provider rate limited. Retrying in {retry_secs}s.")
+    } else {
+        format!("⏳ Temporary provider issue. Retrying in {retry_secs}s.")
+    }
+}
+
+fn format_channel_error_message(error_obj: &Value) -> String {
+    let title = error_obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Request failed");
+    let detail = error_obj
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Please try again.");
+    format!("⚠️ {title}: {detail}")
+}
+
+/// Send a short retry status update to pending channel targets without draining
+/// them. The final reply (or terminal error) will still use the same targets.
+async fn send_retry_status_to_channels(
+    state: &Arc<GatewayState>,
+    session_key: &str,
+    error_obj: &Value,
+    retry_after: Duration,
+) {
+    let targets = state.peek_channel_replies(session_key).await;
+    if targets.is_empty() {
+        return;
+    }
+
+    let outbound = match state.services.channel_outbound_arc() {
+        Some(o) => o,
+        None => return,
+    };
+
+    let message = format_channel_retry_message(error_obj, retry_after);
+    let mut tasks = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outbound = Arc::clone(&outbound);
+        let message = message.clone();
+        tasks.push(tokio::spawn(async move {
+            let reply_to = target.message_id.as_deref();
+            if let Err(e) = outbound
+                .send_text_silent(&target.account_id, &target.chat_id, &message, reply_to)
+                .await
+            {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "failed to send retry status to channel: {e}"
+                );
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!(error = %e, "channel retry status task join failed");
+        }
+    }
+}
+
+/// Drain pending channel targets for a session and send a terminal error message.
+async fn deliver_channel_error(state: &Arc<GatewayState>, session_key: &str, error_obj: &Value) {
+    let targets = state.drain_channel_replies(session_key).await;
+    let status_log = state.drain_channel_status_log(session_key).await;
+    if targets.is_empty() {
+        return;
+    }
+
+    let outbound = match state.services.channel_outbound_arc() {
+        Some(o) => o,
+        None => return,
+    };
+
+    let error_text = format_channel_error_message(error_obj);
+    let logbook_html = format_logbook_html(&status_log);
+    let mut tasks = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outbound = Arc::clone(&outbound);
+        let error_text = error_text.clone();
+        let logbook_html = logbook_html.clone();
+        tasks.push(tokio::spawn(async move {
+            let reply_to = target.message_id.as_deref();
+            let send_result = if logbook_html.is_empty() {
+                outbound
+                    .send_text(&target.account_id, &target.chat_id, &error_text, reply_to)
+                    .await
+            } else {
+                outbound
+                    .send_text_with_suffix(
+                        &target.account_id,
+                        &target.chat_id,
+                        &error_text,
+                        &logbook_html,
+                        reply_to,
+                    )
+                    .await
+            };
+            if let Err(e) = send_result {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "failed to send channel error reply: {e}"
+                );
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!(error = %e, "channel error task join failed");
+        }
+    }
 }
 
 async fn deliver_channel_replies_to_targets(
@@ -5760,6 +5902,23 @@ mod tests {
             "delivery should wait for outbound send completion"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn format_channel_retry_message_rounds_up_seconds() {
+        let error_obj = serde_json::json!({ "type": "rate_limit_exceeded" });
+        let msg = format_channel_retry_message(&error_obj, Duration::from_millis(1_200));
+        assert!(msg.contains("Retrying in 2s"));
+    }
+
+    #[test]
+    fn format_channel_error_message_prefers_structured_fields() {
+        let error_obj = serde_json::json!({
+            "title": "Rate limited",
+            "detail": "Please wait and try again.",
+        });
+        let msg = format_channel_error_message(&error_obj);
+        assert_eq!(msg, "⚠️ Rate limited: Please wait and try again.");
     }
 
     #[tokio::test]
