@@ -96,6 +96,22 @@ fn parse_server_config(params: &Value) -> Result<moltis_mcp::McpServerConfig, St
     };
     let url = params.get("url").and_then(|v| v.as_str()).map(String::from);
 
+    let oauth = params.get("oauth").and_then(|v| {
+        let client_id = v.get("client_id")?.as_str()?.to_string();
+        let auth_url = v.get("auth_url")?.as_str()?.to_string();
+        let token_url = v.get("token_url")?.as_str()?.to_string();
+        let scopes: Vec<String> = v
+            .get("scopes")
+            .and_then(|s| serde_json::from_value(s.clone()).ok())
+            .unwrap_or_default();
+        Some(moltis_mcp::registry::McpOAuthConfig {
+            client_id,
+            auth_url,
+            token_url,
+            scopes,
+        })
+    });
+
     Ok(moltis_mcp::McpServerConfig {
         command: command.into(),
         args,
@@ -103,6 +119,7 @@ fn parse_server_config(params: &Value) -> Result<moltis_mcp::McpServerConfig, St
         enabled,
         transport,
         url,
+        oauth,
     })
 }
 
@@ -280,6 +297,22 @@ impl McpService for LiveMcpService {
 
         self.manager
             .update_server(name, config)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        self.sync_tools_if_ready().await;
+
+        Ok(serde_json::json!({ "ok": true }))
+    }
+
+    async fn reauth(&self, params: Value) -> ServiceResult {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'name' parameter".to_string())?;
+
+        self.manager
+            .reauth_server(name)
             .await
             .map_err(|e| e.to_string())?;
 

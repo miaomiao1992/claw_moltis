@@ -1304,6 +1304,15 @@ pub async fn start_gateway(
                     "sse" => moltis_mcp::registry::TransportType::Sse,
                     _ => moltis_mcp::registry::TransportType::Stdio,
                 };
+                let oauth = entry
+                    .oauth
+                    .as_ref()
+                    .map(|o| moltis_mcp::registry::McpOAuthConfig {
+                        client_id: o.client_id.clone(),
+                        auth_url: o.auth_url.clone(),
+                        token_url: o.token_url.clone(),
+                        scopes: o.scopes.clone(),
+                    });
                 merged
                     .servers
                     .insert(name.clone(), moltis_mcp::McpServerConfig {
@@ -1313,6 +1322,7 @@ pub async fn start_gateway(
                         enabled: entry.enabled,
                         transport,
                         url: entry.url.clone(),
+                        oauth,
                     });
             }
         }

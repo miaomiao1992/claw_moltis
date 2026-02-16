@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- OAuth 2.1 support for remote MCP servers — automatic discovery (RFC 9728/8414), dynamic client registration (RFC 7591), PKCE authorization code flow, and Bearer token injection with 401 retry
+- `McpOAuthOverride` config option for servers that don't implement standard OAuth discovery
+- `mcp.reauth` RPC method to manually trigger re-authentication for a server
+- Persistent storage of dynamic client registrations at `~/.config/moltis/mcp_oauth_registrations.json`
+
 ### Changed
 
 ### Deprecated

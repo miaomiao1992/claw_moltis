@@ -160,6 +160,28 @@ pub struct ToolsCallResult {
 /// MCP protocol version we implement.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+// ── Transport Errors ──────────────────────────────────────────────────
+
+/// Typed transport errors for MCP SSE connections.
+///
+/// Used by `SseTransport` to distinguish recoverable auth errors (401)
+/// from other HTTP failures, enabling the auth retry flow.
+#[derive(Debug, thiserror::Error)]
+pub enum McpTransportError {
+    /// MCP server returned HTTP 401 Unauthorized.
+    #[error("MCP server returned HTTP 401 Unauthorized")]
+    Unauthorized {
+        /// The `WWW-Authenticate` header value, if present.
+        www_authenticate: Option<String>,
+    },
+    /// MCP server returned a non-success HTTP status.
+    #[error("MCP server returned HTTP {status}: {body}")]
+    HttpError { status: u16, body: String },
+    /// Any other transport error.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

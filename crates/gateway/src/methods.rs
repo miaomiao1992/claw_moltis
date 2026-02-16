@@ -163,6 +163,7 @@ const WRITE_METHODS: &[&str] = &[
     "mcp.enable",
     "mcp.disable",
     "mcp.restart",
+    "mcp.reauth",
     "mcp.update",
     "cron.add",
     "cron.update",
@@ -2361,10 +2362,16 @@ impl MethodRegistry {
                         obj.insert("replying".to_string(), serde_json::Value::Bool(replying));
                         if replying {
                             if let Some(text) = chat.active_thinking_text(key).await {
-                                obj.insert("thinkingText".to_string(), serde_json::Value::String(text));
+                                obj.insert(
+                                    "thinkingText".to_string(),
+                                    serde_json::Value::String(text),
+                                );
                             }
                             if chat.active_voice_pending(key).await {
-                                obj.insert("voicePending".to_string(), serde_json::Value::Bool(true));
+                                obj.insert(
+                                    "voicePending".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
                             }
                         }
                     }
@@ -2914,6 +2921,19 @@ impl MethodRegistry {
                         .services
                         .mcp
                         .restart(ctx.params.clone())
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
+            "mcp.reauth",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .mcp
+                        .reauth(ctx.params.clone())
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
                 })

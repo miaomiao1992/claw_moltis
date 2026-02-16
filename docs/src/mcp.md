@@ -203,6 +203,42 @@ Run the server directly to debug:
 echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | node server.js
 ```
 
+## OAuth Authentication
+
+Remote MCP servers can require OAuth 2.1 authentication. Moltis handles this automatically — when a server returns `401 Unauthorized`, the OAuth flow starts without any manual configuration.
+
+### How It Works
+
+1. Moltis connects to the remote MCP server
+2. The server returns `401 Unauthorized` with a `WWW-Authenticate` header
+3. Moltis discovers the authorization server via [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) (Protected Resource Metadata)
+4. Moltis performs [dynamic client registration](https://www.rfc-editor.org/rfc/rfc7591) (RFC 7591)
+5. A PKCE authorization code flow opens your browser for login
+6. After login, tokens are stored and used for all subsequent requests
+
+Client registrations and tokens are cached locally, so you only need to log in once per server.
+
+### Manual OAuth Configuration
+
+If a server doesn't support standard OAuth discovery, you can configure credentials manually:
+
+```toml
+[[mcp.servers]]
+name = "private-api"
+url = "https://mcp.example.com/sse"
+transport = "sse"
+
+[mcp.servers.oauth]
+client_id = "your-client-id"
+auth_url = "https://auth.example.com/authorize"
+token_url = "https://auth.example.com/token"
+scopes = ["mcp:read", "mcp:write"]
+```
+
+### Re-authentication
+
+If your session expires or tokens are revoked, Moltis automatically re-authenticates on the next `401` response. You can also trigger re-authentication manually via the `mcp.reauth` RPC method.
+
 ## Security Considerations
 
 ```admonish warning
