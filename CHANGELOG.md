@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Telegram queued replies**: route channel reply targets per queued message so
+  `chat.message_queue_mode = "followup"` delivers replies one-by-one instead of
+  collapsing queued channel replies into a single batch delivery.
+- **Queue mode default**: make one-by-one replay (`followup`) explicit as the
+  `ChatConfig` default, with config-level tests to prevent regressions.
+
 ### Security
 
 ## [0.8.35] - 2026-02-15
