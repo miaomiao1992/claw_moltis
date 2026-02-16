@@ -79,17 +79,11 @@ fn parse_tool_calls(content: &[serde_json::Value]) -> Vec<ToolCall> {
 }
 
 fn retry_after_ms_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?;
-    let text = value.to_str().ok()?.trim();
-    let seconds = text.parse::<u64>().ok()?;
-    seconds.checked_mul(1_000)
+    super::retry_after_ms_from_headers(headers)
 }
 
 fn with_retry_after_marker(base: String, retry_after_ms: Option<u64>) -> String {
-    match retry_after_ms {
-        Some(ms) => format!("{base} (retry_after_ms={ms})"),
-        None => base,
-    }
+    super::with_retry_after_marker(base, retry_after_ms)
 }
 
 /// Convert `ChatMessage` list to Anthropic format.
